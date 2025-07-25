@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <title>Enduro GPS Tracker with Sidebar</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html, body { margin: 0; height: 100%; }
+    .container { display: flex; height: 100vh; }
+    #map { flex: 2; }
+    #sidebar {
+      flex: 1;
+      max-width: 160px;
+      padding: 8px;
+      overflow-y: auto;
+      background: #f9f9f9;
+      border-left: 1px solid #ccc;
+      font-size: 11px;
+    }
+    #sidebar h3 {
+      font-size: 13px;
+      margin: 0 0 8px 0;
+    }
+    .racer-box {
+      background: #fff;
+      border: 1px solid #ccc;
+      margin-bottom: 6px;
+      padding: 6px;
+      border-left: 3px solid #007bff;
+    }
+    .racer-box h4 { 
+      margin: 0 0 3px 0; 
+      font-size: 11px;
+    }
+    .racer-box small { 
+      color: #666; 
+      font-size: 9px;
+      line-height: 1.2;
+    }
+    .map-controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 8px;
+      border-radius: 4px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+    }
+    .map-controls select {
+      padding: 4px 8px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      font-size: 12px;
+    }
+    .permanent-tooltip {
+      background: none !important;
+      border: none !important;
+      box-shadow: none !important;
+    }
+    .permanent-tooltip .leaflet-tooltip-content {
+      margin: 0 !important;
+      padding: 0 !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="map">
+      <div class="map-controls">
+        <select id="mapStyle" onchange="changeMapStyle()">
+          <option value="satellite">Satellite</option>
+          <option value="street">Street Map</option>
+          <option value="topo">Topographic</option>
+        </select>
+      </div>
+    </div>
+    <div id="sidebar">
+      <h3>ข้อมูลนักขับ</h3>
+      <div id="racer-list"></div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    const apiUrl = 'https://pkwvrlsshc.execute-api.ap-southeast-1.amazonaws.com/dev-event-web/gps-list?eventType=ENDURO&eventCode=nanglae&channel=V3';
+    const colorJsonUrl = 'color.json';
+    const refreshIntervalSeconds = 5;
+
+    const map = L.map('map').setView([13.75,100.5], 13);
+    
+    // Define map tile layers
+    const mapLayers = {
+      satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19
+      }),
+      street: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19
+      }),
+      topo: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: 19
+      })
+    };
+
+    // Set default layer
+    let currentLayer = mapLayers.satellite;
+    currentLayer.addTo(map);
+
+    const markers = {};
+    const polylines = {};
+    const colors = {};
+    let colorData = [];
+    let firstTime = true;
+
+    // Load color data from JSON file
+    async function loadColorData() {
+      try {
+        const res = await fetch(colorJsonUrl);
+        colorData = await res.json();
+        console.log('Color data loaded:', colorData);
+      } catch(err) {
+        console.error('Failed to load color data:', err);
+        colorData = [];
+      }
+    }
+
+    function getColor(fullCode) {
+      // Return cached color if already assigned
+      if (colors[fullCode]) {
+        return colors[fullCode];
+      }
+
+      // Find color by matching fullCode with id in color.json
+      const colorEntry = colorData.find(entry => entry.id == fullCode);
+      
+      if (colorEntry) {
+        colors[fullCode] = colorEntry.color;
+        return colorEntry.color;
+      }
+
+      // Fallback to random color if not found in JSON
+      const randomColor = '#' + Math.floor(Math.random()*16777215).toString(16);
+      colors[fullCode] = randomColor;
+      return randomColor;
+    }
+
+    function formatTime(ts) {
+      const d = new Date(ts);
+      return d.toLocaleString();
+    }
+
+    async function fetchAndUpdate() {
+      try {
+        const res = await fetch(apiUrl);
+        const { success, data } = await res.json();
+        if (!success || !data) return;
+
+        const grouped = {};
+        data.forEach(p => {
+          grouped[p.raceNo] = grouped[p.raceNo] || [];
+          grouped[p.raceNo].push(p);
+        });
+
+        document.getElementById('racer-list').innerHTML = '';
+        let allLatLngs = [];
+
+        for (const raceNo in grouped) {
+          const entries = grouped[raceNo];
+          entries.sort((a,b)=>new Date(a.createDate)-new Date(b.createDate));
+
+          const coords = entries.map(e=>[e.latitude, e.longitude]);
+          allLatLngs = allLatLngs.concat(coords);
+
+          const latest = entries[entries.length-1];
+          const color = getColor(latest.fullCode || raceNo); // Use fullCode if available, fallback to raceNo
+
+          if (polylines[raceNo]) map.removeLayer(polylines[raceNo]);
+          polylines[raceNo] = L.polyline(coords, { color, weight: 3 }).addTo(map);
+
+          const latlng = [latest.latitude, latest.longitude];
+          if (markers[raceNo]) map.removeLayer(markers[raceNo]);
+          
+          // Create permanent tooltip content
+          const tooltipContent = `
+            <div style="background: rgba(255,255,255,0.95); padding: 4px 6px; border-radius: 3px; border: 1px solid ${color}; font-size: 11px; line-height: 1.3; min-width: 140px; font-family: Arial, sans-serif;">
+              <strong style="color: ${color}; font-size: 12px;">Race #${raceNo}</strong><br>
+              ${latest.fullName ? `<strong style="font-size: 11px;">${latest.fullName}</strong><br>` : ''}
+              ${latest.fullCode ? `<span style="font-size: 10px;">Code: ${latest.fullCode}</span><br>` : ''}
+              <div style="font-size: 9px; margin-top: 2px; color: #444;">
+                Lat: ${latest.latitude.toFixed(6)}<br>
+                Lng: ${latest.longitude.toFixed(6)}<br>
+                ${formatTime(latest.createDate)}
+              </div>
+            </div>
+          `;
+          
+          markers[raceNo] = L.marker(latlng, {
+            icon: L.divIcon({
+              className: 'custom-icon',
+              html: `<div style="width:28px;height:28px;color:${color};font-size:20px;text-align:center;line-height:28px;text-shadow:1px 1px 2px rgba(0,0,0,0.8);">🏍️</div>`,
+              iconSize: [28,28], iconAnchor:[14,14]
+            })
+          }).addTo(map)
+            .bindTooltip(tooltipContent, {
+              permanent: true,
+              direction: 'top',
+              offset: [0, -15],
+              className: 'permanent-tooltip'
+            })
+            .bindPopup(
+              `RaceNo: ${raceNo}<br>` +
+              (latest.fullName?`Name: ${latest.fullName}<br>`:'') +
+              (latest.fullCode?`Code: ${latest.fullCode}<br>`:'') +
+              `Time: ${formatTime(latest.createDate)}`
+            );
+
+          const box = document.createElement('div');
+          box.className = 'racer-box';
+          box.style.borderLeftColor = color;
+          box.innerHTML = `
+            <h4>Race ${raceNo} ${latest.fullName?('- '+latest.fullName):''}</h4>
+            ${latest.fullCode?`<small>Code: ${latest.fullCode}</small><br>`:''}
+            <small>Latest: ${formatTime(latest.createDate)}</small><br>
+            <small>Lat: ${latest.latitude.toFixed(6)}<br>Lng: ${latest.longitude.toFixed(6)}</small>
+          `;
+          document.getElementById('racer-list').appendChild(box);
+        }
+
+        if (firstTime && allLatLngs.length>0) {
+          map.fitBounds(allLatLngs, {padding:[40,40]});
+          firstTime = false;
+        }
+      } catch(err) {
+        console.error(err);
+      }
+    }
+
+    // Map style switcher function
+    function changeMapStyle() {
+      const selectedStyle = document.getElementById('mapStyle').value;
+      
+      // Remove current layer
+      map.removeLayer(currentLayer);
+      
+      // Add new layer
+      currentLayer = mapLayers[selectedStyle];
+      currentLayer.addTo(map);
+    }
+
+    // Initialize the application
+    async function init() {
+      await loadColorData();
+      fetchAndUpdate();
+      setInterval(fetchAndUpdate, refreshIntervalSeconds * 1000);
+    }
+
+    init();
+  </script>
+</body>
+</html>
