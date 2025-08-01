@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ENDURO Nanglae Event GPS Route</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+        }
+        #map-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #map {
+            flex: 1;
+            width: 100%;
+        }
+        #controls {
+            padding: 10px;
+            background: #f5f5f5;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        #status {
+            font-size: 14px;
+            color: #666;
+            width: 100%;
+            margin-bottom: 5px;
+        }
+        .control-group {
+            display: flex;
+            gap: 10px;
+            margin: 5px 0;
+        }
+        button {
+            padding: 8px 15px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+        select {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+        }
+        .legend {
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.2);
+            line-height: 1.5;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin: 3px 0;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            margin-right: 8px;
+            border: 1px solid #999;
+        }
+        .progress-container {
+            width: 100%;
+            background-color: #f1f1f1;
+            margin-top: 5px;
+        }
+        .progress-bar {
+            height: 5px;
+            background-color: #4CAF50;
+            width: 0%;
+            transition: width 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <div id="map-container">
+        <div id="controls">
+            <h2>ENDURO Nanglae Event Route</h2>
+            <div id="status">Loading data...</div>
+            <div class="progress-container">
+                <div id="progressBar" class="progress-bar"></div>
+            </div>
+            <div class="control-group">
+                <button id="resetFocus" disabled>Reset Focus</button>
+                <button id="toggleRoute">Show Route</button>
+                <button id="toggleMarkers">Show Markers</button>
+                <select id="raceSelector" disabled>
+                    <option value="all">All Riders</option>
+                </select>
+            </div>
+        </div>
+        <div id="map"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <script>
+        // Initialize the map
+        const map = L.map('map').setView([18.8, 98.9], 13);
+
+        // Add OpenStreetMap tiles
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+
+        // Variables to store map elements
+        let routeLines = {};
+        let markers = [];
+        let allRoutePoints = {};
+        let simplifiedPoints = {};
+        let isRouteVisible = true;
+        let areMarkersVisible = true;
+        let legend = null;
+
+        // Function to load color definitions
+        async function loadColorDefinitions() {
+            try {
+                const response = await fetch('color.json');
+                if (!response.ok) {
+                    throw new Error('Failed to load color.json');
+                }
+                return await response.json();
+            } catch (error) {
+                console.error('Error loading color definitions:', error);
+                // Fallback to default colors if color.json fails to load
+                return [
+                    {"id": 1, "color": "#7B68EE"},
+                    {"id": 2, "color": "#FFC0CB"},
+                    {"id": 3, "color": "#808000"},
+                    {"id": 4, "color": "#E6E6FA"},
+                    {"id": 5, "color": "#ADD8E6"}
+                ];
+            }
+        }
+
+        // Function to simplify GPS data
+        function simplifyGPSData(points, tolerance = 0.0001) {
+            if (points.length < 2) return points;
+            
+            const simplified = [points[0]];
+            let lastAdded = points[0];
+            
+            for (let i = 1; i < points.length - 1; i++) {
+                const distance = Math.sqrt(
+                    Math.pow(points[i][0] - lastAdded[0], 2) + 
+                    Math.pow(points[i][1] - lastAdded[1], 2)
+                );
+                
+                if (distance > tolerance) {
+                    simplified.push(points[i]);
+                    lastAdded = points[i];
+                }
+            }
+            
+            simplified.push(points[points.length - 1]);
+            return simplified;
+        }
+
+        // Function to process and display GPS data
+        async function processGPSData(gpsData, colors) {
+            document.getElementById('status').textContent = 'Processing data...';
+            document.getElementById('progressBar').style.width = '0%';
+            
+            // Group data by raceNo
+            const dataByRace = {};
+            gpsData.forEach(point => {
+                if (!dataByRace[point.raceNo]) {
+                    dataByRace[point.raceNo] = [];
+                }
+                dataByRace[point.raceNo].push(point);
+            });
+            
+            // Process each race's data
+            const raceNos = Object.keys(dataByRace);
+            const totalRaces = raceNos.length;
+            let processedRaces = 0;
+            
+            for (const raceNo of raceNos) {
+                const raceData = dataByRace[raceNo];
+                const raceColor = colors.find(c => c.id == raceNo)?.color || '#0066ff';
+                
+                // Extract all points for this race
+                allRoutePoints[raceNo] = raceData.map(point => [point.latitude, point.longitude]);
+                
+                // Simplify the points
+                simplifiedPoints[raceNo] = simplifyGPSData(allRoutePoints[raceNo], 0.0001);
+                
+                // Create route line for this race
+                routeLines[raceNo] = L.polyline(simplifiedPoints[raceNo], {
+                    color: raceColor,
+                    weight: 4,
+                    opacity: 0.7
+                });
+                
+                if (isRouteVisible) {
+                    routeLines[raceNo].addTo(map);
+                }
+                
+                // Process markers for this race
+                await processMarkers(raceData, raceNo, raceColor);
+                
+                // Update progress
+                processedRaces++;
+                const progress = (processedRaces / totalRaces) * 100;
+                document.getElementById('progressBar').style.width = `${progress}%`;
+                
+                // Add to race selector
+                const option = document.createElement('option');
+                option.value = raceNo;
+                option.textContent = `Rider ${raceNo}`;
+                document.getElementById('raceSelector').appendChild(option);
+            }
+            
+            // Fit map to show all routes
+            const allBounds = Object.values(routeLines).map(line => line.getBounds());
+            if (allBounds.length > 0) {
+                const combinedBounds = allBounds.reduce((bounds, current) => bounds.extend(current), L.latLngBounds(allBounds[0]));
+                map.fitBounds(combinedBounds);
+                window.routeBounds = combinedBounds;
+            }
+            
+            document.getElementById('status').textContent = 
+                `Displaying ${gpsData.length} GPS points across ${raceNos.length} riders`;
+            document.getElementById('resetFocus').disabled = false;
+            document.getElementById('raceSelector').disabled = false;
+            
+            // Add legend
+            addLegend(colors);
+        }
+
+        // Process markers for a race
+        async function processMarkers(raceData, raceNo, raceColor) {
+            const batchSize = 100;
+            const totalBatches = Math.ceil(raceData.length / batchSize);
+            
+            for (let batch = 0; batch < totalBatches; batch++) {
+                const start = batch * batchSize;
+                const end = Math.min((batch + 1) * batchSize, raceData.length);
+                
+                // Process this batch
+                for (let i = start; i < end; i++) {
+                    const point = raceData[i];
+                    const latLng = [point.latitude, point.longitude];
+                    
+                    // Only create markers for significant points
+                    if (i === 0 || i === raceData.length - 1 || i % 50 === 0) {
+                        let marker;
+                        if (i === 0) {
+                            // Start point
+                            marker = L.circleMarker(latLng, {
+                                radius: 10,
+                                fillColor: raceColor,
+                                color: '#fff',
+                                weight: 2,
+                                opacity: 1,
+                                fillOpacity: 0.8
+                            });
+                            marker.bindTooltip(`START (R${raceNo})`, {permanent: true, direction: 'right'});
+                        } else if (i === raceData.length - 1) {
+                            // End point
+                            marker = L.circleMarker(latLng, {
+                                radius: 10,
+                                fillColor: raceColor,
+                                color: '#fff',
+                                weight: 2,
+                                opacity: 1,
+                                fillOpacity: 0.8
+                            });
+                            marker.bindTooltip(`FINISH (R${raceNo})`, {permanent: true, direction: 'right'});
+                        } else {
+                            // Waypoints
+                            marker = L.circleMarker(latLng, {
+                                radius: 6,
+                                fillColor: raceColor,
+                                color: '#fff',
+                                weight: 2,
+                                opacity: 1,
+                                fillOpacity: 0.8
+                            });
+                            marker.bindTooltip(`R${raceNo} WP-${i}`, {permanent: true, direction: 'right'});
+                        }
+                        
+                        if (areMarkersVisible) marker.addTo(map);
+                        markers.push({
+                            raceNo: raceNo,
+                            marker: marker
+                        });
+                    }
+                }
+                
+                // Yield to UI thread periodically
+                if (batch % 5 === 0) await new Promise(resolve => setTimeout(resolve, 0));
+            }
+        }
+
+        // Add legend to map
+        function addLegend(colors) {
+            if (legend) {
+                map.removeControl(legend);
+            }
+            
+            legend = L.control({position: 'bottomright'});
+            legend.onAdd = function() {
+                const div = L.DomUtil.create('div', 'legend');
+                div.innerHTML = '<h4>Rider Colors</h4>';
+                
+                colors.forEach(colorDef => {
+                    const item = document.createElement('div');
+                    item.className = 'legend-item';
+                    item.innerHTML = `
+                        <div class="legend-color" style="background-color:${colorDef.color}"></div>
+                        <span>Rider ${colorDef.id}</span>
+                    `;
+                    div.appendChild(item);
+                });
+                
+                return div;
+            };
+            legend.addTo(map);
+        }
+
+        // Fetch GPS data and initialize
+        async function initialize() {
+            const colors = await loadColorDefinitions();
+            
+            fetch('https://pkwvrlsshc.execute-api.ap-southeast-1.amazonaws.com/dev-event-web/gps-list?eventType=ENDURO&eventCode=nanglae&channel=V3')
+                .then(response => response.json())
+                .then(data => {
+                    if (data && data.data && data.data.length > 0) {
+                        processGPSData(data.data, colors).catch(error => {
+                            console.error('Error processing GPS data:', error);
+                            document.getElementById('status').textContent = 'Error processing data';
+                        });
+                    } else {
+                        document.getElementById('status').textContent = 'No GPS data available for this event.';
+                    }
+                })
+                .catch(error => {
+                    console.error('Error fetching GPS data:', error);
+                    document.getElementById('status').textContent = 'Failed to load GPS data. Please try again later.';
+                });
+        }
+        
+        // Event listeners
+        document.getElementById('resetFocus').addEventListener('click', function() {
+            if (window.routeBounds) {
+                map.fitBounds(window.routeBounds);
+            }
+        });
+        
+        document.getElementById('toggleRoute').addEventListener('click', function() {
+            isRouteVisible = !isRouteVisible;
+            Object.values(routeLines).forEach(line => {
+                if (isRouteVisible) {
+                    line.addTo(map);
+                } else {
+                    map.removeLayer(line);
+                }
+            });
+            this.textContent = isRouteVisible ? 'Hide Route' : 'Show Route';
+        });
+        
+        document.getElementById('toggleMarkers').addEventListener('click', function() {
+            areMarkersVisible = !areMarkersVisible;
+            markers.forEach(m => {
+                if (areMarkersVisible) {
+                    m.marker.addTo(map);
+                } else {
+                    map.removeLayer(m.marker);
+                }
+            });
+            this.textContent = areMarkersVisible ? 'Hide Markers' : 'Show Markers';
+        });
+        
+        document.getElementById('raceSelector').addEventListener('change', function() {
+            const selectedRace = this.value;
+            
+            // Show/hide routes based on selection
+            Object.entries(routeLines).forEach(([raceNo, line]) => {
+                if (selectedRace === 'all' || raceNo === selectedRace) {
+                    if (isRouteVisible) line.addTo(map);
+                } else {
+                    map.removeLayer(line);
+                }
+            });
+            
+            // Show/hide markers based on selection
+            markers.forEach(m => {
+                if (selectedRace === 'all' || m.raceNo === selectedRace) {
+                    if (areMarkersVisible) m.marker.addTo(map);
+                } else {
+                    map.removeLayer(m.marker);
+                }
+            });
+            
+            // Adjust view if a single rider is selected
+            if (selectedRace !== 'all' && routeLines[selectedRace]) {
+                map.fitBounds(routeLines[selectedRace].getBounds());
+            } else if (window.routeBounds) {
+                map.fitBounds(window.routeBounds);
+            }
+        });
+
+        // Initialize the application
+        initialize();
+    </script>
+</body>
+</html>
