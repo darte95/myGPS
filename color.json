@@ -1,6 +1,6 @@
 [
   {"id": 1, "color": "#7B68EE"},
-  {"id": 2, "color": "#FF0000"},
+  {"id": 2, "color": "#FFAA00"},
   {"id": 3, "color": "#808000"},
   {"id": 4, "color": "#E6E6FA"},
   {"id": 5, "color": "#ADD8E6"},
@@ -1000,3 +1000,4 @@
   {"id": 999, "color": "#FF69B4"},
   {"id": 1000, "color": "#ADFF2F"}
 ]
+
