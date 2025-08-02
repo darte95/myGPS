@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <title>Enduro GPS Tracker with Sidebar</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <style>
+    html, body { 
+      margin: 0; 
+      padding: 0; 
+      height: 100%; 
+      font-family: Arial, sans-serif;
+    }
+    
+    .container { 
+      display: flex; 
+      height: 100vh; 
+      flex-direction: column;
+    }
+    
+    #map { 
+      flex: 1; 
+      width: 100%; 
+      z-index: 1;
+    }
+    
+    #sidebar {
+      width: 100%;
+      max-height: 30vh;
+      padding: 8px;
+      overflow-y: auto;
+      background: #f9f9f9;
+      border-top: 1px solid #ccc;
+      font-size: 11px;
+      box-sizing: border-box;
+      z-index: 2;
+    }
+    
+    #sidebar h3 {
+      font-size: 13px;
+      margin: 0 0 8px 0;
+      padding: 0;
+      position: sticky;
+      top: 0;
+      background: #f9f9f9;
+      padding: 4px 0;
+    }
+    
+    .racer-list-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    
+    .racer-box {
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 6px;
+      border-left: 3px solid #007bff;
+      flex: 1 1 120px;
+      min-width: 120px;
+      box-sizing: border-box;
+    }
+    
+    .racer-box h4 { 
+      margin: 0 0 3px 0; 
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    
+    .racer-box small { 
+      color: #666; 
+      font-size: 9px;
+      line-height: 1.2;
+      display: block;
+    }
+    
+    .speed-indicator {
+      display: inline-block;
+      padding: 1px 4px;
+      border-radius: 3px;
+      background: #f0f0f0;
+      font-weight: bold;
+      margin-right: 3px;
+    }
+    
+    .map-controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 8px;
+      border-radius: 4px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+      display: flex;
+      gap: 8px;
+    }
+    
+    .map-controls select, .map-controls button {
+      padding: 4px 8px;
+      border: 1px solid #ccc;
+      border-radius: 3px;
+      font-size: 12px;
+      background: white;
+    }
+    
+    .permanent-tooltip {
+      background: none !important;
+      border: none !important;
+      box-shadow: none !important;
+    }
+    
+    .permanent-tooltip .leaflet-tooltip-content {
+      margin: 0 !important;
+      padding: 0 !important;
+    }
+    
+    /* Desktop styles */
+    @media (min-width: 768px) {
+      .container {
+        flex-direction: row;
+      }
+      
+      #sidebar {
+        width: 200px;
+        max-height: none;
+        border-top: none;
+        border-left: 1px solid #ccc;
+      }
+      
+      .racer-list-container {
+        display: block;
+      }
+      
+      .racer-box {
+        flex: none;
+        min-width: auto;
+        margin-bottom: 6px;
+      }
+    }
+    
+    /* Loading spinner */
+    .loader {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      border: 5px solid #f3f3f3;
+      border-top: 5px solid #3498db;
+      border-radius: 50%;
+      width: 50px;
+      height: 50px;
+      animation: spin 1s linear infinite;
+      z-index: 1001;
+      display: none;
+    }
+    
+    @keyframes spin {
+      0% { transform: translate(-50%, -50%) rotate(0deg); }
+      100% { transform: translate(-50%, -50%) rotate(360deg); }
+    }
+    
+    /* Notification toast */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.7);
+      color: white;
+      padding: 10px 20px;
+      border-radius: 4px;
+      z-index: 1001;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="map">
+      <div class="map-controls">
+        <select id="mapStyle" onchange="changeMapStyle()">
+          <option value="satellite">Satellite</option>
+          <option value="street">Street Map</option>
+          <option value="topo">Topographic</option>
+        </select>
+        <button id="refreshBtn" title="Refresh Data">⟳</button>
+        <button id="locateBtn" title="Locate Me">📍</button>
+      </div>
+    </div>
+    <div id="sidebar">
+      <h3>ข้อมูลนักขับ</h3>
+      <div id="racer-list" class="racer-list-container"></div>
+    </div>
+  </div>
+  
+  <div class="loader" id="loader"></div>
+  <div class="toast" id="toast"></div>
+
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+  <script>
+    // Configuration
+    const config = {
+      apiUrl: 'https://pkwvrlsshc.execute-api.ap-southeast-1.amazonaws.com/dev-event-web/gps-list?eventType=ENDURO&eventCode=nanglae&channel=V3',
+      colorJsonUrl: 'color.json',
+      refreshIntervalSeconds: 5,
+      defaultView: {
+        center: [13.75, 100.5],
+        zoom: 13
+      },
+      maxZoom: 19,
+      speedUnit: 'km/h', // or 'mph'
+      distanceUnit: 'km' // or 'mi'
+    };
+
+    // Conversion factors
+    const METERS_TO_KM = 0.001;
+    const METERS_TO_MILES = 0.000621371;
+    const MS_TO_KMH = 3.6;
+    const MS_TO_MPH = 2.23694;
+
+    // Initialize map
+    const map = L.map('map').setView(config.defaultView.center, config.defaultView.zoom);
+    
+    // Define map tile layers
+    const mapLayers = {
+      satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: config.maxZoom,
+        attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community'
+      }),
+      street: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: config.maxZoom,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      }),
+      topo: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
+        maxZoom: config.maxZoom,
+        attribution: 'Tiles &copy; Esri &mdash; Esri, DeLorme, NAVTEQ, TomTom, Intermap, iPC, USGS, FAO, NPS, NRCAN, GeoBase, Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community'
+      })
+    };
+
+    // Set default layer
+    let currentLayer = mapLayers.satellite;
+    currentLayer.addTo(map);
+
+    // State management
+    const state = {
+      markers: {},
+      polylines: {},
+      colors: {},
+      colorData: [],
+      firstLoad: true,
+      lastUpdate: null,
+      userLocation: null,
+      previousPositions: {} // To store previous positions for speed calculation
+    };
+
+    // DOM elements
+    const elements = {
+      racerList: document.getElementById('racer-list'),
+      mapStyleSelect: document.getElementById('mapStyle'),
+      refreshBtn: document.getElementById('refreshBtn'),
+      locateBtn: document.getElementById('locateBtn'),
+      loader: document.getElementById('loader'),
+      toast: document.getElementById('toast')
+    };
+
+    // Utility functions
+    const utils = {
+      showLoader: () => elements.loader.style.display = 'block',
+      hideLoader: () => elements.loader.style.display = 'none',
+      showToast: (message, duration = 3000) => {
+        elements.toast.textContent = message;
+        elements.toast.style.display = 'block';
+        setTimeout(() => {
+          elements.toast.style.display = 'none';
+        }, duration);
+      },
+      formatTime: (ts) => {
+        const d = new Date(ts);
+        return d.toLocaleString();
+      },
+      debounce: (func, wait) => {
+        let timeout;
+        return function(...args) {
+          clearTimeout(timeout);
+          timeout = setTimeout(() => func.apply(this, args), wait);
+        };
+      },
+      // Calculate distance between two coordinates in meters (Haversine formula)
+      calculateDistance: (lat1, lon1, lat2, lon2) => {
+        const R = 6371e3; // Earth radius in meters
+        const φ1 = lat1 * Math.PI/180;
+        const φ2 = lat2 * Math.PI/180;
+        const Δφ = (lat2-lat1) * Math.PI/180;
+        const Δλ = (lon2-lon1) * Math.PI/180;
+
+        const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                  Math.cos(φ1) * Math.cos(φ2) *
+                  Math.sin(Δλ/2) * Math.sin(Δλ/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+        return R * c;
+      },
+      // Convert meters to selected distance unit
+      formatDistance: (meters) => {
+        if (config.distanceUnit === 'mi') {
+          return (meters * METERS_TO_MILES).toFixed(2) + ' mi';
+        }
+        return (meters * METERS_TO_KM).toFixed(2) + ' km';
+      },
+      // Convert m/s to selected speed unit
+      formatSpeed: (ms) => {
+        if (config.speedUnit === 'mph') {
+          return (ms * MS_TO_MPH).toFixed(1) + ' mph';
+        }
+        return (ms * MS_TO_KMH).toFixed(1) + ' km/h';
+      },
+      // Get color for speed indicator
+      getSpeedColor: (speedKmh) => {
+        if (speedKmh < 20) return '#4CAF50'; // Green
+        if (speedKmh < 40) return '#FFC107'; // Yellow
+        if (speedKmh < 60) return '#FF9800'; // Orange
+        return '#F44336'; // Red
+      }
+    };
+
+    // Load color data from JSON file
+    async function loadColorData() {
+      try {
+        utils.showLoader();
+        const res = await fetch(config.colorJsonUrl);
+        state.colorData = await res.json();
+        console.log('Color data loaded:', state.colorData);
+      } catch(err) {
+        console.error('Failed to load color data:', err);
+        state.colorData = [];
+      } finally {
+        utils.hideLoader();
+      }
+    }
+
+    function getColor(fullCode) {
+      // Return cached color if already assigned
+      if (state.colors[fullCode]) {
+        return state.colors[fullCode];
+      }
+
+      // Find color by matching fullCode with id in color.json
+      const colorEntry = state.colorData.find(entry => entry.id == fullCode);
+      
+      if (colorEntry) {
+        state.colors[fullCode] = colorEntry.color;
+        return colorEntry.color;
+      }
+
+      // Fallback to random color if not found in JSON
+      const randomColor = `hsl(${Math.floor(Math.random() * 360)}, 70%, 50%)`;
+      state.colors[fullCode] = randomColor;
+      return randomColor;
+    }
+
+    // Calculate speed based on previous and current position
+    function calculateSpeed(raceNo, currentEntry) {
+      if (!state.previousPositions[raceNo]) {
+        state.previousPositions[raceNo] = {
+          position: [currentEntry.latitude, currentEntry.longitude],
+          time: new Date(currentEntry.createDate).getTime(),
+          distance: 0,
+          totalDistance: 0
+        };
+        return { speed: 0, distance: 0, totalDistance: 0 };
+      }
+
+      const prev = state.previousPositions[raceNo];
+      const currentTime = new Date(currentEntry.createDate).getTime();
+      const timeDiff = (currentTime - prev.time) / 1000; // in seconds
+      
+      if (timeDiff <= 0) {
+        return { 
+          speed: 0, 
+          distance: 0,
+          totalDistance: prev.totalDistance
+        };
+      }
+
+      // Calculate distance from previous point
+      const distance = utils.calculateDistance(
+        prev.position[0], prev.position[1],
+        currentEntry.latitude, currentEntry.longitude
+      );
+      
+      const totalDistance = prev.totalDistance + distance;
+      const speed = distance / timeDiff; // in m/s
+
+      // Update previous position
+      state.previousPositions[raceNo] = {
+        position: [currentEntry.latitude, currentEntry.longitude],
+        time: currentTime,
+        distance: distance,
+        totalDistance: totalDistance
+      };
+
+      return { speed, distance, totalDistance };
+    }
+
+    async function fetchAndUpdate() {
+      try {
+        utils.showLoader();
+        const startTime = Date.now();
+        const res = await fetch(config.apiUrl);
+        const { success, data } = await res.json();
+        
+        if (!success || !data) {
+          utils.showToast('No data received from server');
+          return;
+        }
+
+        const grouped = {};
+        data.forEach(p => {
+          grouped[p.raceNo] = grouped[p.raceNo] || [];
+          grouped[p.raceNo].push(p);
+        });
+
+        elements.racerList.innerHTML = '';
+        let allLatLngs = [];
+
+        for (const raceNo in grouped) {
+          const entries = grouped[raceNo];
+          entries.sort((a,b) => new Date(a.createDate) - new Date(b.createDate));
+
+          const coords = entries.map(e => [e.latitude, e.longitude]);
+          allLatLngs = allLatLngs.concat(coords);
+
+          const latest = entries[entries.length-1];
+          const color = getColor(latest.fullCode || raceNo);
+
+          // Calculate speed and distance
+          const { speed, distance, totalDistance } = calculateSpeed(raceNo, latest);
+          const speedKmh = speed * MS_TO_KMH;
+
+          // Update or create polyline
+          if (state.polylines[raceNo]) {
+            state.polylines[raceNo].setLatLngs(coords);
+          } else {
+            state.polylines[raceNo] = L.polyline(coords, { 
+              color, 
+              weight: 3 
+            }).addTo(map);
+          }
+
+          const latlng = [latest.latitude, latest.longitude];
+          
+          // Update or create marker
+          if (state.markers[raceNo]) {
+            state.markers[raceNo].setLatLng(latlng);
+            state.markers[raceNo].setTooltipContent(createTooltipContent(raceNo, latest, color, speed, distance, totalDistance));
+            state.markers[raceNo].setPopupContent(createPopupContent(raceNo, latest, speed, distance, totalDistance));
+          } else {
+            state.markers[raceNo] = L.marker(latlng, {
+              icon: L.divIcon({
+                className: 'custom-icon',
+                html: `<div style="width:28px;height:28px;color:${color};font-size:20px;text-align:center;line-height:28px;text-shadow:1px 1px 2px rgba(0,0,0,0.8);">🏍️</div>`,
+                iconSize: [28,28], 
+                iconAnchor:[14,14]
+              })
+            }).addTo(map)
+              .bindTooltip(createTooltipContent(raceNo, latest, color, speed, distance, totalDistance), {
+                permanent: true,
+                direction: 'top',
+                offset: [0, -15],
+                className: 'permanent-tooltip'
+              })
+              .bindPopup(createPopupContent(raceNo, latest, speed, distance, totalDistance));
+          }
+
+          // Create racer box in sidebar
+          const box = document.createElement('div');
+          box.className = 'racer-box';
+          box.style.borderLeftColor = color;
+          box.innerHTML = createRacerBoxContent(raceNo, latest, speed, distance, totalDistance);
+          box.onclick = () => {
+            map.setView([latest.latitude, latest.longitude], map.getZoom(), {
+              animate: true
+            });
+          };
+          elements.racerList.appendChild(box);
+        }
+
+        if (state.firstLoad && allLatLngs.length > 0) {
+          map.fitBounds(allLatLngs, {padding: [40, 40]});
+          state.firstLoad = false;
+        }
+
+        state.lastUpdate = new Date();
+        const loadTime = Date.now() - startTime;
+        utils.showToast(`Data updated (${loadTime}ms)`);
+      } catch(err) {
+        console.error('Error fetching data:', err);
+        utils.showToast('Error updating data');
+      } finally {
+        utils.hideLoader();
+      }
+    }
+
+    function createTooltipContent(raceNo, data, color, speed, distance, totalDistance) {
+      const speedKmh = speed * MS_TO_KMH;
+      const speedColor = utils.getSpeedColor(speedKmh);
+      
+      return `
+        <div style="background: rgba(255,255,255,0.95); padding: 4px 6px; border-radius: 3px; border: 1px solid ${color}; font-size: 11px; line-height: 1.3; min-width: 140px; font-family: Arial, sans-serif;">
+          <strong style="color: ${color}; font-size: 12px;">Race #${raceNo}</strong><br>
+          ${data.fullName ? `<strong style="font-size: 11px;">${data.fullName}</strong><br>` : ''}
+          ${data.fullCode ? `<span style="font-size: 10px;">Code: ${data.fullCode}</span><br>` : ''}
+          <div style="font-size: 9px; margin-top: 2px; color: #444;">
+            <span class="speed-indicator" style="background: ${speedColor}; color: white;">${utils.formatSpeed(speed)}</span>
+            Dist: ${utils.formatDistance(distance)}<br>
+            Total: ${utils.formatDistance(totalDistance)}<br>
+            Lat: ${data.latitude.toFixed(6)}<br>
+            Lng: ${data.longitude.toFixed(6)}<br>
+            ${utils.formatTime(data.createDate)}
+          </div>
+        </div>
+      `;
+    }
+
+    function createPopupContent(raceNo, data, speed, distance, totalDistance) {
+      return `
+        RaceNo: ${raceNo}<br>
+        ${data.fullName ? `Name: ${data.fullName}<br>` : ''}
+        ${data.fullCode ? `Code: ${data.fullCode}<br>` : ''}
+        Speed: ${utils.formatSpeed(speed)}<br>
+        Last segment: ${utils.formatDistance(distance)}<br>
+        Total distance: ${utils.formatDistance(totalDistance)}<br>
+        Time: ${utils.formatTime(data.createDate)}<br>
+        Lat: ${data.latitude.toFixed(6)}<br>
+        Lng: ${data.longitude.toFixed(6)}
+      `;
+    }
+
+    function createRacerBoxContent(raceNo, data, speed, distance, totalDistance) {
+      const speedKmh = speed * MS_TO_KMH;
+      const speedColor = utils.getSpeedColor(speedKmh);
+      
+      return `
+        <h4>Race ${raceNo} ${data.fullName ? ('- ' + data.fullName) : ''}</h4>
+        ${data.fullCode ? `<small>Code: ${data.fullCode}</small><br>` : ''}
+        <small>
+          <span class="speed-indicator" style="background: ${speedColor}; color: white;">${utils.formatSpeed(speed)}</span>
+          Dist: ${utils.formatDistance(distance)}
+        </small><br>
+        <small>Total: ${utils.formatDistance(totalDistance)}</small><br>
+        <small>Latest: ${utils.formatTime(data.createDate)}</small><br>
+        <small>Lat: ${data.latitude.toFixed(6)}<br>Lng: ${data.longitude.toFixed(6)}</small>
+      `;
+    }
+
+    // Map style switcher function
+    function changeMapStyle() {
+      const selectedStyle = elements.mapStyleSelect.value;
+      
+      // Remove current layer
+      map.removeLayer(currentLayer);
+      
+      // Add new layer
+      currentLayer = mapLayers[selectedStyle];
+      currentLayer.addTo(map);
+    }
+
+    // Handle geolocation
+    function locateUser() {
+      if (!navigator.geolocation) {
+        utils.showToast('Geolocation is not supported by your browser');
+        return;
+      }
+
+      utils.showLoader();
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          state.userLocation = [position.coords.latitude, position.coords.longitude];
+          map.setView(state.userLocation, 15);
+          L.marker(state.userLocation, {
+            icon: L.divIcon({
+              className: 'user-location-icon',
+              html: '<div style="width:24px;height:24px;background:blue;border-radius:50%;border:2px solid white;"></div>',
+              iconSize: [24,24],
+              iconAnchor: [12,12]
+            })
+          }).addTo(map)
+            .bindPopup('Your location');
+          utils.hideLoader();
+          utils.showToast('Location found');
+        },
+        (error) => {
+          utils.hideLoader();
+          utils.showToast(`Unable to get location: ${error.message}`);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 0
+        }
+      );
+    }
+
+    // Initialize the application
+    async function init() {
+      // Set up event listeners
+      elements.refreshBtn.addEventListener('click', fetchAndUpdate);
+      elements.locateBtn.addEventListener('click', locateUser);
+      
+      // Handle window resize
+      window.addEventListener('resize', utils.debounce(() => {
+        map.invalidateSize();
+      }, 200));
+      
+      // Initialize data
+      await loadColorData();
+      await fetchAndUpdate();
+      
+      // Set up auto-refresh
+      setInterval(fetchAndUpdate, config.refreshIntervalSeconds * 1000);
+    }
+
+    // Start the app
+    init();
+  </script>
+</body>
+</html>
